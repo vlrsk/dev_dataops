@@ -1,0 +1,1 @@
+### Using Terraform, created 1 GCS bucket, 1 Bigquery dataset, 1 VM in a GCP project
