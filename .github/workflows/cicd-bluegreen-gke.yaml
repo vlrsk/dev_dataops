@@ -50,8 +50,8 @@ jobs:
       - name: Build and push image (tagged by commit SHA)
         uses: docker/build-push-action@v6
         with:
-          context: ./cicd_cloud_kubernetes
-          file: ./cicd_cloud_kubernetes/Dockerfile
+          context: ./cicd_cloud_kubernetes/app
+          file: ./cicd_cloud_kubernetes/app/Dockerfile
           push: true
           tags: |
             ${{ secrets.DOCKER_USERNAME }}/hello-gitops:${{ github.sha }}
