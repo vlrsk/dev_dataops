@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: hello-gitops
+    color: green
+  name: hello-gitops-green
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: hello-gitops
+      color: green
+  template:
+    metadata:
+      labels:
+        app: hello-gitops
+        color: green
+    spec:
+      containers:
+        - image: hello-gitops
+          name: hello-gitops
+          ports:
+            - name: http
+              containerPort: 8050
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8050
+            initialDelaySeconds: 5
+            periodSeconds: 5
