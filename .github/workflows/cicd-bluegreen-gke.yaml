@@ -47,8 +47,8 @@ jobs:
       - name: Build and push image
         uses: docker/build-push-action@v6
         with:
-          context: .
-          file: ./Dockerfile
+          context: ./cicd_cloud_kubernetes
+          file: ./cicd_cloud_kubernetes/Dockerfile
           push: true
           tags: |
             ${{ secrets.DOCKER_USERNAME }}/hello-gitops:${{ github.sha }}
@@ -90,7 +90,7 @@ jobs:
 
       - name: Apply k8s manifests (deployments/service/ingress)
         run: |
-          kubectl apply -k k8s/
+          kubectl apply -k cicd_cloud_kubernetes/k8s/
 
       - name: Decide active & new color from Service selector
         run: |
