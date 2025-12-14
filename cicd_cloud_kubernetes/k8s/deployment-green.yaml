@@ -18,7 +18,7 @@ spec:
         color: green
     spec:
       containers:
-        - image: hello-gitops
+        - image: vskorodziievskyi/hello-gitops:latest
           name: hello-gitops
           ports:
             - name: http
