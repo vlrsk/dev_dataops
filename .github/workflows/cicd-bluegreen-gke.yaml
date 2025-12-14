@@ -2,9 +2,9 @@ name: CI/CD Blue-Green to GKE
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   pull_request:
-    branches: [ "main" ]
+    branches: ["main"]
 
 concurrency:
   group: hello-gitops-main
@@ -12,6 +12,7 @@ concurrency:
 
 jobs:
   build:
+    name: Build & Push
     runs-on: ubuntu-latest
 
     steps:
@@ -23,19 +24,21 @@ jobs:
         with:
           python-version: "3.10"
 
-      - name: Install dependencies
+      - name: Install dependencies (optional CI)
         run: |
           python -m pip install --upgrade pip
           pip install flake8 pytest
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          if [ -f cicd_cloud_kubernetes/requirements.txt ]; then pip install -r cicd_cloud_kubernetes/requirements.txt; fi
 
-      - name: Lint with flake8
+      - name: Lint with flake8 (optional)
         run: |
+          cd cicd_cloud_kubernetes
           flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
 
-      - name: Test with pytest
+      - name: Test with pytest (optional)
         run: |
+          cd cicd_cloud_kubernetes
           pytest || true
 
       - name: Log in to Docker Hub
@@ -44,19 +47,18 @@ jobs:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      - name: Build and push image
+      - name: Build and push image (tagged by commit SHA)
         uses: docker/build-push-action@v6
         with:
-          context: ./cicd_cloud_kubernetes/app
-          file: ./cicd_cloud_kubernetes/app/Dockerfile
+          context: ./cicd_cloud_kubernetes
+          file: ./cicd_cloud_kubernetes/Dockerfile
           push: true
           tags: |
             ${{ secrets.DOCKER_USERNAME }}/hello-gitops:${{ github.sha }}
-            ${{ secrets.DOCKER_USERNAME }}/hello-gitops:latest
           platforms: linux/amd64
 
   deploy:
-    name: Deploy (Blue/Green)
+    name: Deploy Blue/Green
     runs-on: ubuntu-latest
     needs: build
     if: github.event_name == 'push'
@@ -66,13 +68,15 @@ jobs:
       GKE_CLUSTER: ${{ secrets.GKE_CLUSTER }}
       GKE_LOCATION: ${{ secrets.GKE_LOCATION }}
       NAMESPACE: hello-gitops
-      IMAGE: ${{ secrets.DOCKER_USERNAME }}/hello-gitops:${{ github.sha }}
+      IMAGE_NEW: ${{ secrets.DOCKER_USERNAME }}/hello-gitops:${{ github.sha }}
+      FINAL_REPLICAS: "1"
+      CANARY_REPLICAS: "1"
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Authenticate to Google Cloud
+      - name: Authenticate to Google Cloud (SA JSON)
         uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_CREDENTIALS }}
@@ -88,36 +92,45 @@ jobs:
         run: |
           kubectl create ns "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
 
-      - name: Apply k8s manifests (deployments/service/ingress)
+      - name: Apply Kubernetes manifests (from subdir)
         run: |
           kubectl apply -k cicd_cloud_kubernetes/k8s/
 
-      - name: Decide active & new color from Service selector
+      - name: Decide ACTIVE and NEW color from Service selector
         run: |
           set -e
           ACTIVE=$(kubectl -n "${NAMESPACE}" get svc hello-gitops -o jsonpath='{.spec.selector.color}' 2>/dev/null || true)
           if [ -z "$ACTIVE" ]; then ACTIVE="blue"; fi
           if [ "$ACTIVE" = "blue" ]; then NEW="green"; else NEW="blue"; fi
-
           echo "ACTIVE_COLOR=$ACTIVE" >> $GITHUB_ENV
           echo "NEW_COLOR=$NEW" >> $GITHUB_ENV
-
           echo "Active color: $ACTIVE"
           echo "New color:    $NEW"
 
-      - name: Update image only in NEW deployment
+      - name: Ensure NEW deployment exists
+        run: |
+          kubectl -n "${NAMESPACE}" get deploy "hello-gitops-${NEW_COLOR}"
+
+      - name: Set image for NEW deployment (pin to SHA) + scale to canary
         run: |
           set -e
           kubectl -n "${NAMESPACE}" set image deployment/hello-gitops-"${NEW_COLOR}" \
-            hello-gitops="${IMAGE}"
+            hello-gitops="${IMAGE_NEW}"
+
+          kubectl -n "${NAMESPACE}" scale deployment/hello-gitops-"${NEW_COLOR}" \
+            --replicas="${CANARY_REPLICAS}"
+
+          kubectl -n "${NAMESPACE}" get deploy hello-gitops-"${NEW_COLOR}" -o wide
+          kubectl -n "${NAMESPACE}" get rs -l app=hello-gitops,color="${NEW_COLOR}" -o wide || true
 
       - name: Wait for NEW deployment rollout
         run: |
-          kubectl -n "${NAMESPACE}" rollout status deployment/hello-gitops-"${NEW_COLOR}" --timeout=180s
+          kubectl -n "${NAMESPACE}" rollout status deployment/hello-gitops-"${NEW_COLOR}" --timeout=900s
 
-      - name: Smoke test NEW via preview service (in-cluster curl)
+      - name: Smoke test NEW via in-cluster Service
         run: |
           set -e
+
           cat <<EOF | kubectl apply -f -
           apiVersion: v1
           kind: Service
@@ -137,16 +150,57 @@ jobs:
 
           kubectl -n "${NAMESPACE}" run curl --rm -i --restart=Never \
             --image=curlimages/curl:8.6.0 \
-            --command -- sh -c 'for i in 1 2 3 4 5; do curl -fsS http://hello-gitops-preview/ && exit 0; sleep 2; done; exit 1'
+            --command -- sh -c 'for i in 1 2 3 4 5 6 7 8; do curl -fsS http://hello-gitops-preview/ && exit 0; sleep 2; done; exit 1'
 
           kubectl -n "${NAMESPACE}" delete svc hello-gitops-preview --ignore-not-found
 
-      - name: Switch traffic (patch Service selector)
+      - name: Switch traffic (patch Service selector to NEW)
         run: |
           set -e
           kubectl -n "${NAMESPACE}" patch svc hello-gitops \
             -p "{\"spec\":{\"selector\":{\"app\":\"hello-gitops\",\"color\":\"${NEW_COLOR}\"}}}"
 
-      - name: Scale down OLD deployment (optional cleanup)
+      - name: Scale NEW to final replicas
         run: |
+          set -e
+          kubectl -n "${NAMESPACE}" scale deployment/hello-gitops-"${NEW_COLOR}" \
+            --replicas="${FINAL_REPLICAS}"
+          kubectl -n "${NAMESPACE}" rollout status deployment/hello-gitops-"${NEW_COLOR}" --timeout=900s
+
+      - name: Scale down OLD deployment (keep rollback easy by changing this to 1 if you want)
+        run: |
+          set -e
           kubectl -n "${NAMESPACE}" scale deployment/hello-gitops-"${ACTIVE_COLOR}" --replicas=0 || true
+
+      - name: Show current state
+        run: |
+          echo "=== Service ==="
+          kubectl -n "${NAMESPACE}" get svc hello-gitops -o wide
+          echo "=== Deployments ==="
+          kubectl -n "${NAMESPACE}" get deploy -o wide
+          echo "=== Pods ==="
+          kubectl -n "${NAMESPACE}" get pods -o wide
+
+      - name: Debug on failure (pods/events/describe/logs)
+        if: failure()
+        run: |
+          echo "=== Deployments ==="
+          kubectl -n "${NAMESPACE}" get deploy -o wide || true
+          echo "=== ReplicaSets ==="
+          kubectl -n "${NAMESPACE}" get rs -o wide || true
+          echo "=== Pods (all) ==="
+          kubectl -n "${NAMESPACE}" get pods -o wide || true
+
+          echo "=== Describe pods (NEW color) ==="
+          kubectl -n "${NAMESPACE}" describe pods -l app=hello-gitops,color="${NEW_COLOR}" || true
+
+          echo "=== Events (last 120) ==="
+          kubectl -n "${NAMESPACE}" get events --sort-by=.lastTimestamp | tail -n 120 || true
+
+          echo "=== Logs (NEW color pods) ==="
+          for p in $(kubectl -n "${NAMESPACE}" get pods -l app=hello-gitops,color="${NEW_COLOR}" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+            echo "--- logs for $p ---"
+            kubectl -n "${NAMESPACE}" logs "$p" -c hello-gitops --tail=200 || true
+            echo "--- previous logs for $p ---"
+            kubectl -n "${NAMESPACE}" logs "$p" -c hello-gitops --previous --tail=200 || true
+          done
