@@ -5,6 +5,7 @@ metadata:
     app: hello-gitops
   name: hello-gitops
   annotations:
+    argocd.argoproj.io/sync-wave: "1"
     cloud.google.com/neg: '{"ingress": true}'
 spec:
   ports:

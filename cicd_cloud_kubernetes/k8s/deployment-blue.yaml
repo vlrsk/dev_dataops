@@ -5,6 +5,8 @@ metadata:
   labels:
     app: hello-gitops
     color: blue
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
 spec:
   replicas: 0
   selector:
