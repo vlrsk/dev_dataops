@@ -8,7 +8,7 @@ metadata:
   annotations:
     argocd.argoproj.io/sync-wave: "0"
 spec:
-  replicas: 0
+  replicas: 1
   selector:
     matchLabels:
       app: hello-gitops
@@ -21,7 +21,7 @@ spec:
     spec:
       containers:
         - name: hello-gitops
-          image: hello-gitops
+          image: vskorodziievskyi/hello-gitops:e8538098e06fab8bd6116d4e009a766b84d8727a
           imagePullPolicy: Always
           ports:
             - name: http
